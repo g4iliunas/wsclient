@@ -14,6 +14,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <stdbool.h>
+
 static int wsclient_send_handshake(struct bufferevent *bev)
 {
     // UXXsy2TW7eYLBnmyDnOCrQ==
@@ -73,48 +75,71 @@ static void eventcb(struct bufferevent *bev, short events, void *ctx)
 int wsclient_init(
     struct event_base *base, const char *address, const uint16_t port)
 {
+    bool is_ssl = address[2] == 's';
+    address += is_ssl ? 6 : 5;
+    printf("%s\n", address);
+
     struct sockaddr_in sin = {0};
     sin.sin_family = AF_INET;
     sin.sin_port = htons(port);
     if (inet_pton(AF_INET, address, &sin.sin_addr) != 1)
         return 1;
 
-    const SSL_METHOD *method = SSLv23_client_method();
-    SSL_CTX *ctx = SSL_CTX_new(method);
-    if (!ctx)
-        return 1;
+    const SSL_METHOD *method;
+    SSL_CTX *ctx;
+    SSL *ssl;
 
-    SSL *ssl = SSL_new(ctx);
-    if (!ssl) {
-        SSL_CTX_free(ctx);
-        return 1;
+    if (is_ssl) {
+        method = SSLv23_client_method();
+        ctx = SSL_CTX_new(method);
+        if (!ctx)
+            return 1;
+
+        ssl = SSL_new(ctx);
+        if (!ssl) {
+            SSL_CTX_free(ctx);
+            return 1;
+        }
     }
 
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd == -1) {
-        SSL_CTX_free(ctx);
-        SSL_free(ssl);
+        if (is_ssl) {
+            SSL_CTX_free(ctx);
+            SSL_free(ssl);
+        }
         return 1;
     }
 
     // first we connect then we set the socket to nonblockable
     if (connect(sockfd, (struct sockaddr *)&sin, sizeof(sin)) != 0 ||
         fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) | O_NONBLOCK) == -1) {
-        SSL_CTX_free(ctx);
-        SSL_free(ssl);
+        if (is_ssl) {
+            SSL_CTX_free(ctx);
+            SSL_free(ssl);
+        }
         close(sockfd);
         return 1;
     }
 
-    struct bufferevent *bev = bufferevent_openssl_socket_new(
-        base, sockfd, ssl, BUFFEREVENT_SSL_CONNECTING, BEV_OPT_CLOSE_ON_FREE);
+    struct bufferevent *bev =
+        is_ssl ? bufferevent_openssl_socket_new(
+                     base, sockfd, ssl, BUFFEREVENT_SSL_CONNECTING,
+                     BEV_OPT_CLOSE_ON_FREE)
+               : bufferevent_socket_new(base, sockfd, BEV_OPT_CLOSE_ON_FREE);
 
     if (!bev) {
-        SSL_CTX_free(ctx);
-        SSL_free(ssl);
+        if (is_ssl) {
+            SSL_CTX_free(ctx);
+            SSL_free(ssl);
+        }
         close(sockfd);
         return 1;
     }
+
+    // because that doesnt trigger connect event
+    if (!is_ssl)
+        wsclient_send_handshake(bev);
 
     bufferevent_setcb(bev, readcb, NULL, eventcb, NULL);
     bufferevent_enable(bev, EV_READ | EV_WRITE);

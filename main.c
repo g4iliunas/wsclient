@@ -13,7 +13,7 @@ int main(void)
     assert(base != NULL);
 
     // connecting to gateway.discord.gg
-    assert(wsclient_init(base, "162.159.133.234", 443) == 0);
+    assert(wsclient_init(base, "wss://162.159.133.234", 443) == 0);
 
     event_base_dispatch(base);
     event_base_free(base);
