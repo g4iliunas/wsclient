@@ -44,40 +44,64 @@ static int wsclient_send_handshake(struct bufferevent *bev)
 
 static void readcb(struct bufferevent *bev, void *ctx)
 {
+    struct wsclient_ctx *cbarg = (struct wsclient_ctx *)ctx;
+
     struct evbuffer *input = bufferevent_get_input(bev);
     size_t len = evbuffer_get_length(input);
     struct evbuffer_iovec vec[1];
     evbuffer_peek(input, -1, NULL, vec, 1);
+    char *data = (char *)vec[0].iov_base;
+
+    if (data[0] == 'H' && data[1] == 'T' && data[2] == 'T' && data[3] == 'P') {
+        if (cbarg->readcb)
+            cbarg->readcb(bev, (uint8_t *)data, len);
+        return;
+    }
 
     fprintf(stdout, "Got %lu bytes of data\n", len);
-    fprintf(stdout, "%.*s\n", (int)vec[0].iov_len, (char *)vec[0].iov_base);
+    fprintf(stdout, "%.*s\n", (int)vec[0].iov_len, data);
 
+    // parse frame
+    uint8_t fin = data[0] >> 7;
+    uint8_t opcode = data[0] & 0xf;
     evbuffer_drain(input, len);
+}
+
+static void writecb(struct bufferevent *bev, void *ctx)
+{
+    struct wsclient_ctx *cbarg = (struct wsclient_ctx *)ctx;
+    if (cbarg->writecb)
+        cbarg->writecb(bev, cbarg->ctx);
 }
 
 static void eventcb(struct bufferevent *bev, short events, void *ctx)
 {
+    struct wsclient_ctx *cbarg = (struct wsclient_ctx *)ctx;
+
     if (events & BEV_EVENT_CONNECTED) {
         fprintf(stdout, "Connected to the server\n");
-
-        int ret = wsclient_send_handshake(bev);
-        fprintf(stdout, "Handshake ret: %d\n", ret);
+        if (wsclient_send_handshake(bev) != 0) {
+            fprintf(stderr, "Failed to send the handshake\n");
+            if (cbarg->eventcb)
+                cbarg->eventcb(bev, BEV_EVENT_ERROR, ctx);
+        }
+        else {
+            if (cbarg->eventcb)
+                cbarg->eventcb(bev, events, ctx);
+        }
     }
-    else if (events & BEV_EVENT_ERROR) {
-        fprintf(stderr, "Failed to connect\n");
-        event_base_loopexit(bufferevent_get_base(bev), NULL);
-    }
-    else if (events & BEV_EVENT_EOF) {
-        fprintf(stdout, "Server has closed the connection\n");
+    else {
+        if (cbarg->eventcb)
+            cbarg->eventcb(bev, events, ctx);
     }
 }
 
 int wsclient_init(
-    struct event_base *base, const char *address, const uint16_t port)
+    struct event_base *base, const char *address, const uint16_t port,
+    struct wsclient_ctx *cbarg)
 {
     bool is_ssl = address[2] == 's';
     address += is_ssl ? 6 : 5;
-    printf("%s\n", address);
 
     struct sockaddr_in sin = {0};
     sin.sin_family = AF_INET;
@@ -139,9 +163,16 @@ int wsclient_init(
 
     // because that doesnt trigger connect event
     if (!is_ssl)
-        wsclient_send_handshake(bev);
+        if (wsclient_send_handshake(bev) != 0) {
+            if (is_ssl) {
+                SSL_CTX_free(ctx);
+                SSL_free(ssl);
+            }
+            close(sockfd);
+            return 1;
+        }
 
-    bufferevent_setcb(bev, readcb, NULL, eventcb, NULL);
+    bufferevent_setcb(bev, readcb, NULL, eventcb, cbarg);
     bufferevent_enable(bev, EV_READ | EV_WRITE);
     return 0;
 }
